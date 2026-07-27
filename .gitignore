@@ -1,0 +1,7 @@
+/target
+
+# JetBrains IDE
+.idea/
+
+# Claude Code local config
+.claude/

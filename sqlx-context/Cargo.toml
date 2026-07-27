@@ -1,0 +1,15 @@
+[package]
+name = "sqlx-context"
+version = "0.0.1"
+edition = "2024"
+description = "A DbContext wrapper for sqlx that unifies a Sqlite Pool and Transaction behind a single Executor"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/DAIRO-HY/sqlx-context"
+
+[dependencies]
+futures-core = "0.3"
+sqlx = { version = "0.8", features = [
+    "sqlite",
+    "runtime-tokio",
+] }

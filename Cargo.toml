@@ -1,0 +1,2 @@
+[workspace]
+members = [ "sqlx-context-sample", "sqlx-context"]

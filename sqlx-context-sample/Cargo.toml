@@ -1,0 +1,13 @@
+[package]
+name = "sqlx-context-sample"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+sqlx-context = {path = "../sqlx-context" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+sqlx = { version = "0.8", features = [
+    "sqlite",
+    "runtime-tokio",
+    "macros",
+] }
