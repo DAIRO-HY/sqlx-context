@@ -43,7 +43,7 @@ pub async fn insert1(ctx: &mut DbContext) -> Result<(), sqlx::Error> {
         .execute(&mut *ctx)
         .await?;
     sqlx::query("INSERT INTO test (key1, key2) VALUES ('insert1-2', '232wefsfs')")
-        .execute(&mut *ctx)
+        .execute(ctx)
         .await?;
     Ok(())
 }

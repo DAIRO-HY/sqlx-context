@@ -34,7 +34,7 @@ async fn insert(ctx: &mut DbContext) -> sqlx::Result<()> {
 
 ```toml
 [dependencies]
-sqlx-context = "0.0.1"
+sqlx-context = "0.0.2"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 ```
 
@@ -96,6 +96,35 @@ called — if no transaction is active, queries run directly against the pool.
   no transaction is open.
 - `&mut DbContext` implements `sqlx::Executor`, so it can be passed anywhere sqlx expects
   an executor (`.execute()`, `.fetch_one()`, `query!` macros, etc.).
+
+## Write log
+
+`DbContext` can record every successfully executed write statement (SQL text with `?`
+placeholders + bound parameters as `serde_json::Value`). This is used by the code generated
+by [`sqlx-dsl-dao`](https://crates.io/crates/sqlx-dsl-dao), and handwritten code can use it too.
+
+```rust,ignore
+ctx.enable_write_log();
+ctx.begin().await?;
+// ... writes; generated DAO functions call ctx.push_write_log(sql, params) after success
+let logs: Vec<sqlx_context::WriteLog> = ctx.take_write_log();
+ctx.commit().await?;
+for log in logs {
+    println!("{} {}", log.sql, log.params_json()); // e.g. `insert into t (a, b) values (?, ?) [1,null]`
+}
+```
+
+- `ctx.enable_write_log()` / `ctx.disable_write_log()` / `ctx.is_write_log_enabled()`
+- `ctx.take_write_log() -> Vec<WriteLog>` — returns and clears the recorded logs (logging stays enabled).
+- `ctx.push_write_log(sql, params)` — records one entry; a no-op while logging is disabled.
+- `ctx.rollback()` discards the entries recorded since `begin()`.
+- `sqlx_context::log_value(value)` converts anything bindable to SQLite into a JSON value,
+  reusing sqlx's own encoding: integers/floats -> number, strings -> string, `None` -> `null`,
+  `bool` -> `true`/`false`, `Vec<u8>` -> standard base64 string.
+- `serde_json` is re-exported as `sqlx_context::serde_json`.
+
+When logging is disabled nothing is allocated; generated code only performs one
+`is_write_log_enabled()` check per write.
 
 ## Notes
 
