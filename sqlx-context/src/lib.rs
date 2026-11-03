@@ -52,13 +52,31 @@ impl DbContext {
 
     /// 开启一个新事务。若当前已经处于事务中(`tx` 非空),返回错误而不覆盖原事务。
     pub fn begin(&mut self) -> impl Future<Output = Result<(), sqlx::Error>> + Send {
+        self.begin_inner(None)
+    }
+
+    /// 开启一个立即获取写锁的事务(SQLite: `BEGIN IMMEDIATE`)。
+    /// 默认的 DEFERRED 事务先读后写时,若期间有其他连接提交了写入,会直接返回
+    /// 517 SQLITE_BUSY_SNAPSHOT 且不会等待 busy_timeout;IMMEDIATE 事务在开启时就拿到写锁,
+    /// 其他写事务会按 busy_timeout 排队等待。已经处于事务中时的行为与 [`begin`](Self::begin) 一致。
+    pub fn begin_immediate(&mut self) -> impl Future<Output = Result<(), sqlx::Error>> + Send {
+        self.begin_inner(Some("BEGIN IMMEDIATE"))
+    }
+
+    fn begin_inner(
+        &mut self,
+        statement: Option<&'static str>,
+    ) -> impl Future<Output = Result<(), sqlx::Error>> + Send {
         async move {
             if self.tx.is_some() {
                 return Err(sqlx::Error::Configuration(
                     "DbContext::begin called while a transaction is already active".into(),
                 ));
             }
-            self.tx = Some(self.pool.begin().await?);
+            self.tx = Some(match statement {
+                Some(statement) => self.pool.begin_with(statement).await?,
+                None => self.pool.begin().await?,
+            });
             self.tx_log_start = self.write_log.as_ref().map_or(0, Vec::len);
             Ok(())
         }
@@ -244,5 +262,69 @@ mod tests {
         ctx.commit().await.unwrap();
         assert_eq!(logs, [WriteLog { sql: "committed".into(), params: vec![json!("a")] }]);
         assert!(ctx.is_write_log_enabled());
+    }
+
+    #[tokio::test]
+    async fn begin_immediate_serializes_writers() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let path = std::env::temp_dir().join(format!(
+            "sqlx-context-immediate-{}-{:?}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        sqlx::query("create table t (v integer)").execute(&pool).await.unwrap();
+
+        let mut ctx1 = DbContext::new(pool.clone());
+        ctx1.begin_immediate().await.unwrap();
+        let count: i64 = sqlx::query_scalar("select count(*) from t")
+            .fetch_one(&mut ctx1)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // 第二个写事务:必须等 ctx1 提交后才能开始
+        let ctx1_committed = Arc::new(AtomicBool::new(false));
+        let writer = tokio::spawn({
+            let pool = pool.clone();
+            let ctx1_committed = ctx1_committed.clone();
+            async move {
+                let mut ctx2 = DbContext::new(pool);
+                ctx2.begin_immediate().await.unwrap();
+                assert!(ctx1_committed.load(Ordering::SeqCst), "ctx2 began before ctx1 committed");
+                sqlx::query("insert into t values (2)").execute(&mut ctx2).await.unwrap();
+                ctx2.commit().await.unwrap();
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!writer.is_finished());
+
+        // 读完之后再写,不应出现 517 SQLITE_BUSY_SNAPSHOT
+        sqlx::query("insert into t values (1)").execute(&mut ctx1).await.unwrap();
+        ctx1_committed.store(true, Ordering::SeqCst);
+        ctx1.commit().await.unwrap();
+        writer.await.unwrap();
+
+        let values: Vec<i64> = sqlx::query_scalar("select v from t order by rowid")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(values, [1, 2]);
+        pool.close().await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 }
